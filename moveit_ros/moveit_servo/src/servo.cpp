@@ -404,10 +404,14 @@ Eigen::VectorXd Servo::jointDeltaFromCommand(const ServoInput& command, const mo
       // Transform the twist command to the planning frame, which is the base frame of the active subgroup's IK solver,
       // before applying it. Additionally verify there is an IK solver, and that the transformation is successful.
       const auto planning_frame_maybe = getIKSolverBaseFrame(robot_state, active_subgroup_name);
-      if (planning_frame_maybe.has_value())
+      const auto tip_frame_maybe = getIKSolverTipFrame(robot_state, active_subgroup_name);
+      if (planning_frame_maybe.has_value() && tip_frame_maybe.has_value())
       {
+
         const auto& planning_frame = *planning_frame_maybe;
-        const auto command_in_planning_frame_maybe = toPlanningFrame(std::get<TwistCommand>(command), planning_frame);
+        const auto& tip_frame = *tip_frame_maybe;
+        const auto command_in_planning_frame_maybe = toPlanningFrame(std::get<TwistCommand>(command), planning_frame, tip_frame);
+
         if (command_in_planning_frame_maybe.has_value())
         {
           delta_result = jointDeltaFromTwist(*command_in_planning_frame_maybe, robot_state, servo_params_,
@@ -575,7 +579,7 @@ std::optional<Eigen::Isometry3d> Servo::getPlanningToCommandFrameTransform(const
   }
 }
 
-std::optional<TwistCommand> Servo::toPlanningFrame(const TwistCommand& command, const std::string& planning_frame) const
+std::optional<TwistCommand> Servo::toPlanningFrame(const TwistCommand& command, const std::string& planning_frame, const std::string& tip_frame) const
 {
   Eigen::VectorXd transformed_twist = command.velocities;
 
@@ -606,26 +610,44 @@ std::optional<TwistCommand> Servo::toPlanningFrame(const TwistCommand& command, 
     }
     else
     {
-      // If the twist command is applied about the planning frame, the spatial twist is calculated
+      const auto tip_to_command_tf_maybe = getPlanningToCommandFrameTransform(command.frame_id, tip_frame);
+      if (!tip_to_command_tf_maybe.has_value())
+      {
+        return std::nullopt;
+      }
+      const auto& tip_to_command_tf = *tip_to_command_tf_maybe;
+
+      // If the twist command is applied about the tip frame, the spatial twist is calculated
       // as shown in Equation 3.83 in http://hades.mech.northwestern.edu/images/7/7f/MR.pdf.
       // The above equation defines twist as [angular; linear], but in our convention it is
       // [linear; angular] so the adjoint matrix is also reordered accordingly.
       Eigen::MatrixXd adjoint(6, 6);
 
-      const Eigen::Matrix3d& rotation = planning_to_command_tf.rotation();
-      const Eigen::Vector3d& translation = planning_to_command_tf.translation();
+      const Eigen::Matrix3d& rotation = tip_to_command_tf.rotation();
+      const Eigen::Vector3d& translation = tip_to_command_tf.translation();
 
       Eigen::Matrix3d skew_translation;
       skew_translation.row(0) << 0, -translation(2), translation(1);
       skew_translation.row(1) << translation(2), 0, -translation(0);
       skew_translation.row(2) << -translation(1), translation(0), 0;
 
-      adjoint.topLeftCorner(3, 3) = skew_translation * rotation;
-      adjoint.topRightCorner(3, 3) = rotation;
-      adjoint.bottomLeftCorner(3, 3) = rotation;
-      adjoint.bottomRightCorner(3, 3).setZero();
+      adjoint.topLeftCorner(3, 3) = rotation;
+      adjoint.topRightCorner(3, 3) = skew_translation * rotation;
+      adjoint.bottomLeftCorner(3, 3).setZero();
+      adjoint.bottomRightCorner(3, 3) = rotation;
 
       transformed_twist = adjoint * transformed_twist;
+
+      // Look up the transform between the planning and tip frames.
+      const auto planning_to_tip_tf_maybe = getPlanningToCommandFrameTransform(tip_frame, planning_frame);
+      if (!planning_to_tip_tf_maybe.has_value())
+      {
+        return std::nullopt;
+      }
+      const auto& planning_to_tip_tf = *planning_to_tip_tf_maybe;
+      const auto planning_to_tip_rotation = planning_to_tip_tf.linear();
+      transformed_twist.head<3>() = planning_to_tip_rotation * transformed_twist.head<3>();
+      transformed_twist.tail<3>() = planning_to_tip_rotation * transformed_twist.tail<3>();
     }
   }
 

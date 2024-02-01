@@ -164,7 +164,7 @@ private:
    * @param planning_frame The name of the planning frame.
    * @return The transformed twist command.
    */
-  std::optional<TwistCommand> toPlanningFrame(const TwistCommand& command, const std::string& planning_frame) const;
+  std::optional<TwistCommand> toPlanningFrame(const TwistCommand& command, const std::string& planning_frame, const std::string& tip_frame) const;
 
   /**
    * \brief Convert a given pose command to planning frame
